@@ -48,17 +48,28 @@ function waitForTabComplete(tabId, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
 
-    const onUpdated = (updatedTabId, info) => {
-      if (updatedTabId === tabId && info.status === "complete") {
-        chrome.tabs.onUpdated.removeListener(onUpdated);
-        resolve();
-      } else if (Date.now() - start > timeoutMs) {
-        chrome.tabs.onUpdated.removeListener(onUpdated);
-        reject(new Error("Timed out waiting for page load."));
-      }
+    const poll = () => {
+      chrome.tabs.get(tabId, (tab) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+
+        if (tab.status === "complete") {
+          resolve();
+          return;
+        }
+
+        if (Date.now() - start > timeoutMs) {
+          reject(new Error("Timed out waiting for page load."));
+          return;
+        }
+
+        setTimeout(poll, 250);
+      });
     };
 
-    chrome.tabs.onUpdated.addListener(onUpdated);
+    poll();
   });
 }
 
@@ -69,33 +80,37 @@ function executeExtraction(tabId) {
         target: { tabId },
         func: () => {
           const clean = (text) => (text || "").replace(/\s+/g, " ").trim();
+          const dateRegex = /[A-Za-z]{3}\s+\d{1,2},\s+\d{4}/;
 
-          const isQuestionLink = (href) => {
+          const isQuestionHref = (href) => {
             if (!href) return false;
-            return /^\/interview-questions\/[^/]+$/.test(href);
+            let pathname = href;
+            try {
+              pathname = new URL(href, location.origin).pathname;
+            } catch (_e) {
+              // keep original href
+            }
+
+            if (!pathname.startsWith("/interview-questions/")) return false;
+            if (pathname.includes("/position/")) return false;
+            if (pathname.includes("/category/")) return false;
+            if (pathname.includes("/company/")) return false;
+
+            const suffix = pathname.replace("/interview-questions/", "");
+            return Boolean(suffix) && !suffix.includes("/");
           };
 
-          const findCard = (questionLink) => {
-            return (
-              questionLink.closest("div[class*='rounded-lg']") ||
-              questionLink.closest("article") ||
-              questionLink.parentElement
-            );
-          };
-
-          const links = Array.from(document.querySelectorAll("a[href^='/interview-questions/']"));
-          const questionLinks = links.filter((a) => {
-            const href = a.getAttribute("href") || "";
-            const txt = clean(a.textContent);
-            return isQuestionLink(href) && txt.length > 8;
-          });
-
+          const cards = Array.from(document.querySelectorAll("div[class*='rounded-lg'], article, li"));
           const rows = [];
 
-          questionLinks.forEach((questionLink) => {
+          cards.forEach((card) => {
+            const questionLink = Array.from(card.querySelectorAll("a[href]"))
+              .find((a) => isQuestionHref(a.getAttribute("href")) && clean(a.textContent).length > 8);
+
+            if (!questionLink) return;
+
             const question = clean(questionLink.textContent);
-            const card = findCard(questionLink);
-            if (!card || !question) return;
+            if (!question) return;
 
             const position = clean(
               card.querySelector("a[href*='/interview-questions/position/']")?.textContent
@@ -103,11 +118,12 @@ function executeExtraction(tabId) {
             const category = clean(
               card.querySelector("a[href*='/interview-questions/category/']")?.textContent
             );
+
             const date = clean(
               card.querySelector("p.text-xs")?.textContent ||
-                Array.from(card.querySelectorAll("p,span,div"))
-                  .map((el) => clean(el.textContent))
-                  .find((t) => /[A-Za-z]{3}\s+\d{1,2},\s+\d{4}/.test(t))
+              Array.from(card.querySelectorAll("p,span,div,time"))
+                .map((el) => clean(el.textContent))
+                .find((t) => dateRegex.test(t))
             );
 
             rows.push({
@@ -131,7 +147,8 @@ function executeExtraction(tabId) {
           return {
             count: unique.length,
             rows: unique,
-            title: document.title
+            title: document.title,
+            url: location.href
           };
         }
       },
@@ -168,24 +185,27 @@ async function scrapeCompany(company) {
 
       await updateTab(tabId, url);
       await waitForTabComplete(tabId);
-      await sleep(1200);
 
-      setStatus(`Extracting page ${pageNo}...`);
-      const result = await executeExtraction(tabId);
-      const pageRows = result.rows || [];
+      let pageRows = [];
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        await sleep(800);
+        setStatus(`Extracting page ${pageNo} (attempt ${attempt}/5)...`);
+        const result = await executeExtraction(tabId);
+        pageRows = result.rows || [];
+        if (pageRows.length > 0) break;
+      }
 
       if (pageRows.length === 0) {
         emptyPages += 1;
-        if (emptyPages >= 1) break;
+        if (emptyPages >= 2) break;
       } else {
         emptyPages = 0;
         allRows.push(...pageRows);
       }
 
-      // stop if we've likely reached end
       if (pageNo >= 200) break;
       pageNo += 1;
-      await sleep(500);
+      await sleep(300);
     }
   } finally {
     if (originalUrl) {
