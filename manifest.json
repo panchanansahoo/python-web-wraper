@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Interview Question Scraper",
+  "version": "1.1.0",
+  "description": "Scrape paginated interview questions by company and export them to Excel.",
+  "permissions": [
+    "downloads",
+    "tabs",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://interviewquestionbank.com/*"
+  ],
+  "action": {
+    "default_title": "Interview Scraper",
+    "default_popup": "popup.html"
+  }
+}
